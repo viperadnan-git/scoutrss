@@ -7,7 +7,7 @@ ScoutRSS is a Python package for monitoring RSS feeds and triggering callbacks w
 To install ScoutRSS, use pip:
 
 ```bash
-pip install ScoutRSS
+pip install scoutrss
 ```
 
 ## Usage
@@ -15,7 +15,7 @@ pip install ScoutRSS
 To use ScoutRSS, create an instance of the `ScoutRSS` class and pass in the RSS feed URL, a callback function to be called when new entries are found, and other optional parameters.
 
 ```python
-from ScoutRSS import ScoutRSS
+from scoutrss import ScoutRSS
 
 def callback(entries):
     print("Found {} new entries".format(len(entries)))
@@ -41,6 +41,8 @@ watcher.stop_listener()
 You can use the `check_confirmation` parameter to control whether to update the last saved on timestamp based on the return value of the callback function. If set to `True`, the `callback` function should return `True` to update the last saved on timestamp:
 
 ```python
+from scoutrss import ScoutRSS
+
 def callback(entries):
     for entry in entries:
         print("Found new entry: {}".format(entry.title))
