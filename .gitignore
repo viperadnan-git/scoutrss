@@ -1,5 +1,7 @@
 *__pycache__
 build
-dist
+dist/
 *.egg-info
 scoutrss.data.json
+.venv
+scoutrss/_version.py

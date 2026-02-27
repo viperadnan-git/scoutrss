@@ -1,0 +1,37 @@
+name: publush to pypi
+
+on:
+    push:
+        tags:
+            - "v*"
+
+concurrency:
+    group: ${{ github.workflow }}
+
+jobs:
+    deploy:
+        name: upload release to pypi
+
+        runs-on: ubuntu-latest
+
+        environment:
+            name: pypi
+            url: https://pypi.org/p/scoutrss/
+
+        permissions:
+            id-token: write
+
+        steps:
+            - name: checkout code
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+
+            - name: install the latest version of uv
+              uses: astral-sh/setup-uv@v7
+
+            - name: build package
+              run: uv build
+
+            - name: publish to pypi
+              uses: pypa/gh-action-pypi-publish@release/v1
