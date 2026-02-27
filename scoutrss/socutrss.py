@@ -1,137 +1,155 @@
 import logging
-from datetime import datetime
-from time import mktime
-from typing import Callable, List
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
+from time import mktime, struct_time
+from typing import Any, Callable, List, Optional, cast
 
-import pickledb
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.schedulers.base import BaseScheduler
-from apscheduler.schedulers.blocking import BlockingScheduler
 from feedparser import FeedParserDict, parse
 
-LOGGER = logging.getLogger(__name__)
+from .storage.adapter import StorageAdapter
+from .storage.file import FileStorage
+
+logger = logging.getLogger(__name__)
 
 
 class ScoutRSS:
     def __init__(
         self,
         url: str,
-        callback: Callable[[List[FeedParserDict]], bool],
-        id: str = None,
-        last_saved_on: datetime = None,
-        check_confirmation: bool = True,
-        scheduler_timezone: ZoneInfo = ZoneInfo("UTC"),
-        database_path: str = "scoutrss.data.json",
+        callback: Callable[[FeedParserDict], Any],
+        storage: Optional[StorageAdapter] = None,
+        id: Optional[str] = None,
+        last_seen: Optional[datetime] = None,
+        require_confirmation: bool = False,
     ):
         """
         :param url: RSS feed url
-        :param callback: callback function to call when new entries are found (entries are passed as a list)
-        :param id: id to use to save the last saved on timestamp (defaults to url)
-        :param last_saved_on: last saved on timestamp (defaults to now if not provided and not saved in db)
-        :param check_confirmation: whether to check for confirmation from the callback function (defaults to False)
+        :param callback: function called once per new entry; return value is only used when require_confirmation=True
+        :param storage: storage adapter (defaults to FileStorage)
+        :param id: id for storing state (defaults to url)
+        :param last_seen: override the last seen timestamp
+        :param require_confirmation: update timestamp only if callback returns True
         """
         self.url = url
         self.id = id or url
         self.callback = callback
-        self.check_confirmation = check_confirmation
-        self.db = pickledb.load(database_path, True)
-        if last_saved_on:
-            self.update_last_saved_on(last_saved_on)
-        elif not self.db.get(self.id):
-            self.update_last_saved_on(datetime.now())
-        else:
-            self.update_last_saved_on()
-        self.scheduler_timezone = scheduler_timezone
+        self.require_confirmation = require_confirmation
+        self.storage = storage or FileStorage()
 
-    def update_last_saved_on(self, new_last_saved_on: datetime = None):
-        """
-        Updates the last saved on timestamp
-
-        :param new_last_saved_on: new last saved on timestamp to use
-        """
-        if new_last_saved_on:
-            self.db.set(self.id, new_last_saved_on.isoformat())
-            self.last_saved_on = new_last_saved_on
+        if last_seen:
+            self._update_last_seen(last_seen)
         else:
-            last_saved_on_isoformat = self.db.get(self.id)
-            self.last_saved_on = (
-                datetime.fromisoformat(last_saved_on_isoformat)
-                if last_saved_on_isoformat
-                else datetime.now()
+            stored = self.storage.get_last_seen(self.id)
+            self._update_last_seen(
+                stored if stored is not None else datetime.now(tz=timezone.utc)
             )
 
-    def check(self):
-        """
-        Checks for new entries in the RSS feed
-        """
+    def _update_last_seen(self, dt: datetime) -> None:
+        self.storage.set_last_seen(self.id, dt)
+        self.last_seen = dt
 
-        self.update_last_saved_on()
+    @staticmethod
+    def _struct_to_datetime(struct: struct_time) -> datetime:
+        return datetime.fromtimestamp(mktime(struct), tz=timezone.utc)
+
+    def check(self) -> None:
+        """Check for new entries in the RSS feed and invoke the callback per entry.
+
+        Entries are processed oldest-first so last_seen advances progressively.
+        On callback failure or False return (when require_confirmation=True),
+        processing stops but previously confirmed entries remain saved.
+        """
+        self.last_seen = self.storage.get_last_seen(self.id) or self.last_seen
 
         parsed = parse(self.url)
-        entries = [
+
+        if not parsed.entries:
+            return
+
+        new_entries = (
             entry
             for entry in parsed.entries
-            if datetime.fromtimestamp(mktime(entry.published_parsed))
-            > self.last_saved_on
-        ]
-
-        LOGGER.debug("There are {} new entries".format(len(entries)))
-        last_saved_on = datetime.fromtimestamp(
-            mktime(parsed.entries[0].published_parsed)
+            if entry.get("published_parsed")
+            and self._struct_to_datetime(cast(struct_time, entry.published_parsed))
+            > self.last_seen
         )
 
-        if entries:
+        # sort oldest-first so last_seen advances entry by entry
+        new_entries = sorted(
+            new_entries,
+            key=lambda e: e.published_parsed,
+        )
+
+        logger.debug(f"Found {len(new_entries)} new entries for {self.url}")
+
+        for entry in new_entries:
+            entry_time = self._struct_to_datetime(
+                cast(struct_time, entry.published_parsed)
+            )
             try:
-                confirm = self.callback(entries)
-                if self.check_confirmation:
+                confirm = self.callback(entry)
+                if self.require_confirmation:
                     if confirm:
-                        self.update_last_saved_on(last_saved_on)
+                        self._update_last_seen(entry_time)
                     else:
-                        LOGGER.warning(
-                            "Callback returned False, not updating last_saved_on timestamp"
+                        logger.warning(
+                            "Callback returned False, stopping at current entry"
                         )
+                        break
                 else:
-                    self.update_last_saved_on(last_saved_on)
+                    self._update_last_seen(entry_time)
             except Exception:
-                LOGGER.exception(
-                    "Error while calling callback, not updating last_saved_on timestamp"
-                )
+                logger.exception("Error in callback, stopping at current entry")
+                break
 
     def listen(
-        self, interval: int = 60, blocking=False, apscheduler: BaseScheduler = None
-    ):
+        self,
+        interval: int = 60,
+        blocking: bool = False,
+        scheduler=None,
+        check_fn: Optional[Callable] = None,
+    ) -> None:
         """
-        Starts the scheduler
+        Start watching the feed on a schedule.
 
-        :param interval: Interval in seconds (default: 60)
-        :param blocking: If True, the scheduler will block the current thread (default: False)
+        Requires APScheduler: pip install scoutrss[scheduler]
 
+        :param interval: check interval in seconds (default: 60)
+        :param blocking: block the current thread (default: False)
+        :param scheduler: existing APScheduler instance to reuse; if not provided, a new one is created and started automatically
+        :param check_fn: custom callable to use instead of self.check (e.g. wrapped with retry logic)
         """
-        self.should_shutdown_scheduler = False
-        if not apscheduler:
-            self.should_shutdown_scheduler = True
-            self.scheduler = (BlockingScheduler if blocking else BackgroundScheduler)(
-                timezone=self.scheduler_timezone
+        self._should_shutdown_scheduler = scheduler is None
+        if scheduler is None:
+            try:
+                from apscheduler.schedulers.background import BackgroundScheduler
+                from apscheduler.schedulers.blocking import BlockingScheduler
+            except ImportError:
+                raise ImportError(
+                    "APScheduler is required for listen(). "
+                    "Install it with: pip install scoutrss[scheduler]"
+                )
+            self._scheduler = (BlockingScheduler if blocking else BackgroundScheduler)(
+                timezone="UTC"
             )
         else:
-            self.scheduler = apscheduler
-        self.scheduler.add_job(
-            self.check,
+            self._scheduler = scheduler
+
+        self._scheduler.add_job(
+            check_fn or self.check,
             "interval",
             seconds=interval,
-            id=self.id,
-            max_instances=1,  # Only one instance of the job can run at a time to avoid fetching the same entries multiple times
-            next_run_time=datetime.now(tz=self.scheduler_timezone),
+            id=f"scoutrss:{self.id}",
+            max_instances=1,  # prevent overlapping runs
+            next_run_time=datetime.now(tz=timezone.utc),
         )
-        LOGGER.info("Watching RSS feed {} every {} seconds".format(self.url, interval))
-        self.scheduler.start()
+        logger.info(f"Watching {self.url} every {interval}s")
 
-    def stop_listener(self):
-        """
-        Stops the scheduler
-        """
-        self.scheduler.remove_job(self.id)
-        if self.should_shutdown_scheduler:
-            self.scheduler.shutdown()
-        LOGGER.info("ScoutRSS Stopped listening to {}".format(self.url))
+        if self._should_shutdown_scheduler or blocking:
+            self._scheduler.start()
+
+    def stop(self) -> None:
+        """Stop the scheduled feed watcher."""
+        self._scheduler.remove_job(f"scoutrss:{self.id}")
+        if self._should_shutdown_scheduler:
+            self._scheduler.shutdown()
+        logger.info(f"Stopped watching {self.url}")

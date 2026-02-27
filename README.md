@@ -1,90 +1,143 @@
 # ScoutRSS
 
-ScoutRSS is a Python package for monitoring RSS feeds and triggering callbacks when new entries are found. It uses the [feedparser](https://pypi.org/project/feedparser/) package to parse RSS feeds and the [APScheduler](https://pypi.org/project/APScheduler/) package to schedule checks at regular intervals.
+ScoutRSS is a Python library for monitoring RSS feeds and triggering callbacks when new entries are found. It uses [feedparser](https://pypi.org/project/feedparser/) for parsing and supports pluggable storage backends.
 
 ## Installation
-
-To install ScoutRSS, use pip:
 
 ```bash
 pip install scoutrss
 ```
 
+With built-in scheduler support:
+
+```bash
+pip install scoutrss[scheduler]
+```
+
+With MongoDB storage support:
+
+```bash
+pip install scoutrss[mongo]
+```
+
 ## Usage
 
-To use ScoutRSS, create an instance of the `ScoutRSS` class and pass in the RSS feed URL, a callback function to be called when new entries are found, and other optional parameters.
-
-```python
-from scoutrss import ScoutRSS
-
-def callback(entries):
-    print("Found {} new entries".format(len(entries)))
-
-watcher = ScoutRSS("http://example.com/feed.xml", callback)
-watcher.listen()
-```
-
-This will start monitoring the RSS feed and calling the `callback` function whenever new entries are found. The `listen` method starts the scheduler with a default interval of 60 seconds. You can customize the interval by passing a different value to the `interval` parameter:
-
-```python
-watcher.listen(interval=120)  # Check every 2 minutes
-```
-
-You can also use the `stop_listener` method to stop monitoring the RSS feed:
-
-```python
-watcher.stop_listener()
-```
-
-### Advanced usage
-
-You can use the `check_confirmation` parameter to control whether to update the last saved on timestamp based on the return value of the callback function. If set to `True`, the `callback` function should return `True` to update the last saved on timestamp:
+### Basic
 
 ```python
 from scoutrss import ScoutRSS
 
 def callback(entries):
     for entry in entries:
-        print("Found new entry: {}".format(entry.title))
-    return True
+        print("New entry:", entry.title)
 
-watcher = ScoutRSS("http://example.com/feed.xml", callback, check_confirmation=True)
-watcher.listen()
+watcher = ScoutRSS("https://example.com/feed.xml", callback)
+watcher.check()  # one-off check
 ```
 
-You can also use the `id` parameter to specify a unique ID for the RSS feed. This can be useful if you want to monitor multiple RSS feeds with different callback functions:
+### With scheduler
 
 ```python
-watcher1 = ScoutRSS("http://example1.com/feed.xml", callback1, id="feed1")
-watcher2 = ScoutRSS("http://example2.com/feed.xml", callback2, id="feed2")
+watcher = ScoutRSS("https://example.com/feed.xml", callback)
+watcher.listen(interval=60)   # background, non-blocking
+watcher.listen(interval=60, blocking=True)  # blocks current thread
+watcher.stop()
 ```
 
-By default, the last saved on timestamp is stored in a pickledb database file named `scoutrss.data.json` in the current directory. You can customize the database file path by passing a different value to the `load` method of the `pickledb` package:
+### Storage backends
+
+By default, state is persisted to `scoutrss.data.json` in the current directory. You can switch backends or use in-memory storage:
 
 ```python
-import pickledb
+from scoutrss import ScoutRSS, FileStorage, MemoryStorage, MongoStorage
 
-db = pickledb.load("custom/path/to/database.json", True)
-watcher = ScoutRSS("http://example.com/feed.xml", callback, db=db)
+# Custom file path
+watcher = ScoutRSS(url, callback, storage=FileStorage("data/feeds.json"))
+
+# In-memory (no persistence, useful for testing)
+watcher = ScoutRSS(url, callback, storage=MemoryStorage())
+
+# MongoDB
+from pymongo import MongoClient
+collection = MongoClient()["mydb"]["rss"]
+watcher = ScoutRSS(url, callback, storage=MongoStorage(collection))
 ```
 
-You can also pass in a custom scheduler instance if you want to use a different scheduler:
+### Custom ID
+
+By default the URL is used as the storage key. Override with `id`:
 
 ```python
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+watcher = ScoutRSS(url, callback, id="my-feed")
+```
 
-scheduler = AsyncIOScheduler()
-watcher = ScoutRSS("http://example.com/feed.xml", callback, apscheduler=scheduler)
+### Require confirmation
+
+Set `require_confirmation=True` to only advance the timestamp if the callback returns `True`:
+
+```python
+def callback(entries):
+    success = process(entries)
+    return success  # only update last_seen if True
+
+watcher = ScoutRSS(url, callback, require_confirmation=True)
+```
+
+### Custom scheduler
+
+Pass an existing APScheduler instance to share it across multiple watchers:
+
+```python
+from apscheduler.schedulers.background import BackgroundScheduler
+
+scheduler = BackgroundScheduler()
+scheduler.start()
+
+watcher1 = ScoutRSS(url1, callback1)
+watcher2 = ScoutRSS(url2, callback2)
+
+watcher1.listen(interval=60, scheduler=scheduler)
+watcher2.listen(interval=120, scheduler=scheduler)
+```
+
+### Custom retry logic
+
+Pass a custom `check_fn` to `listen()` to wrap `check()` with retry logic:
+
+```python
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+def check_with_retry():
+    watcher.check()
+
+watcher.listen(interval=60, check_fn=check_with_retry)
+```
+
+### Custom storage adapter
+
+Implement `StorageAdapter` to use any storage backend:
+
+```python
+from scoutrss import StorageAdapter
+from datetime import datetime
+
+class RedisStorage(StorageAdapter):
+    def __init__(self, client):
+        self._client = client
+
+    def get_last_seen(self, id: str) -> datetime | None:
+        val = self._client.get(id)
+        return datetime.fromisoformat(val) if val else None
+
+    def set_last_seen(self, id: str, last_seen: datetime) -> None:
+        self._client.set(id, last_seen.isoformat())
 ```
 
 ## License
 
-ScoutRSS is licensed under the GNU v3 license. See the `LICENSE` file for more information.
+ScoutRSS is licensed under the [GNU GPLv3 license](LICENSE).
 
 ## Contributing
 
-Contributions are welcome! See the `CONTRIBUTING.md` file for more information.
-
-## Credits
-
-ScoutRSS was created by Adnan Ahmad and licensed under the [GNU GPLv3 license](LICENSE).
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for more information.

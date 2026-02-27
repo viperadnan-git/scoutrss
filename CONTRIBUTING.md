@@ -4,7 +4,7 @@ Thank you for considering contributing to ScoutRSS! This guide will help you und
 
 ## Issues
 
-If you find any issues, please open an issue on our [GitHub Issues](https://github.com/username/repo/issues) page. When you open an issue, please provide the following information:
+If you find any issues, please open an issue on our [GitHub Issues](https://github.com/viperadnan-git/scoutrss/issues) page. When you open an issue, please provide the following information:
 
 - Description of the issue
 - Steps to reproduce the issue
@@ -34,14 +34,14 @@ When you create a pull request, please provide the following information:
 
 ## Code Style
 
-Please follow the [PEP 8](https://www.python.org/dev/peps/pep-0008/) style guide for Python code. We also recommend using [Black](https://black.readthedocs.io/en/stable/) to automatically format your code.
+Please follow the [PEP 8](https://www.python.org/dev/peps/pep-0008/) style guide for Python code. We use [Ruff](https://docs.astral.sh/ruff/) for linting and formatting.
 
 ## Tests
 
 Please ensure that your changes are covered by tests. You can run tests locally by running the following command:
 
-```
-python -m unittest discover -s tests
+```bash
+uv run pytest tests/
 ```
 
 ## License

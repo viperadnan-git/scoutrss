@@ -8,10 +8,9 @@ authors = [{ name = "Adnan Ahmad", email = "viperadnan@gmail.com" }]
 requires-python = ">=3.8"
 keywords = ["rss", "feed", "watcher", "scheduler", "notifications"]
 dependencies = [
-    "APScheduler>=3.8.0",
     "feedparser>=6.0.8",
-    "pickledb>=0.9.2",
 ]
+
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
@@ -21,9 +20,16 @@ classifiers = [
     "Programming Language :: Python :: 3.9",
 ]
 
+[project.optional-dependencies]
+scheduler = ["APScheduler>=3.8.0"]
+mongo = ["pymongo>=4.0"]
+all = ["scoutrss[scheduler,mongo]"]
+
 [project.urls]
 Homepage = "https://github.com/viperadnan-git/scoutrss"
 Repository = "https://github.com/viperadnan-git/scoutrss"
+
+# --- Build ---
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
@@ -39,12 +45,20 @@ version-file = "scoutrss/_version.py"
 [tool.hatch.build.targets.wheel]
 packages = ["scoutrss"]
 
-[tool.isort]
-multi_line_output = 3
+# --- Linting ---
+
+[tool.ruff]
+exclude = ["scoutrss/_version.py"]
+
+[tool.ruff.lint]
+select = ["F", "I"]  # pyflakes + isort
+fixable = ["F401", "I"]
+
+# --- Dev dependencies ---
 
 [dependency-groups]
 dev = [
-    "autoflake>=2.0",
-    "black>=24.8.0",
-    "isort>=5.13.2",
+    "pytest>=8.3.5",
+    "pytest-mock>=3.14.1",
+    "ruff>=0.15.4",
 ]

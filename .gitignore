@@ -5,3 +5,4 @@ dist/
 scoutrss.data.json
 .venv
 scoutrss/_version.py
+.claude/settings.local.json
