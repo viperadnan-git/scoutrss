@@ -54,6 +54,15 @@ exclude = ["scoutrss/_version.py"]
 select = ["F", "I"]  # pyflakes + isort
 fixable = ["F401", "I"]
 
+[tool.nizm.hooks]
+ruff = { cmd = "uvx ruff check --fix {staged_files} && uvx ruff format {staged_files}", glob = "*.py" }
+
+# --- Testing ---
+
+[tool.pytest.ini_options]
+markers = ["integration: tests that require network access"]
+addopts = "-m 'not integration'"
+
 # --- Dev dependencies ---
 
 [dependency-groups]

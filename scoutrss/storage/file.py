@@ -5,7 +5,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from .adapter import StorageAdapter
+from .adapter import FeedState, StorageAdapter
 
 
 class FileStorage(StorageAdapter):
@@ -21,15 +21,34 @@ class FileStorage(StorageAdapter):
     def _write(self, data: dict) -> None:
         self._path.write_text(json.dumps(data))
 
-    def get_last_seen(self, id: str) -> datetime | None:
+    def get_state(self, id: str) -> FeedState:
         with self._lock:
-            entry = self._read().get(id)
-            if not entry:
-                return None
-            return datetime.fromisoformat(entry["last_seen_at"])
+            entry = self._read().get(id, {})
+            val = entry.get("last_seen_at")
+            return FeedState(
+                last_seen=datetime.fromisoformat(val) if val else None,
+                seen_ids=set(entry.get("seen_ids", [])),
+                etag=entry.get("etag"),
+                modified=entry.get("modified"),
+            )
 
-    def set_last_seen(self, id: str, last_seen: datetime) -> None:
+    def set_state(
+        self,
+        id: str,
+        last_seen: datetime | None = None,
+        seen_ids: set[str] | None = None,
+        etag: str | None = None,
+        modified: str | None = None,
+    ) -> None:
         with self._lock:
             data = self._read()
-            data[id] = {"last_seen_at": last_seen.isoformat()}
+            entry = data.setdefault(id, {})
+            if last_seen is not None:
+                entry["last_seen_at"] = last_seen.isoformat()
+            if seen_ids is not None:
+                entry["seen_ids"] = list(seen_ids)
+            if etag is not None:
+                entry["etag"] = etag
+            if modified is not None:
+                entry["modified"] = modified
             self._write(data)

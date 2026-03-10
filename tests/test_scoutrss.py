@@ -15,17 +15,32 @@ NEW2 = datetime(2024, 1, 21, 0, 0, 0, tzinfo=timezone.utc)
 NEW3 = datetime(2024, 1, 22, 0, 0, 0, tzinfo=timezone.utc)
 
 
-def make_entry(published: datetime) -> MagicMock:
+def make_entry(
+    published: datetime, id: str = None, link: str = None, title: str = None
+) -> MagicMock:
     entry = MagicMock()
     entry.published_parsed = strptime(
         published.strftime("%Y-%m-%d %H:%M:%S"), "%Y-%m-%d %H:%M:%S"
     )
+    entry.id = id
+    entry.link = link
+    entry.title = title
+
+    def mock_get(key, default=None):
+        return getattr(entry, key, default)
+
+    entry.get = mock_get
     return entry
 
 
-def make_parsed(*entries):
+def make_parsed(*entries, etag=None, modified=None, status=200):
     parsed = MagicMock()
     parsed.entries = list(entries)
+    parsed.get = lambda key, default=None: {
+        "status": status,
+        "etag": etag,
+        "modified": modified,
+    }.get(key, default)
     return parsed
 
 
@@ -48,20 +63,20 @@ class TestInit:
             mock_dt.now.return_value = NOW
             mock_dt.fromtimestamp = datetime.fromtimestamp
             ScoutRSS(URL, lambda e: None, storage=storage)
-        assert storage.get_last_seen(URL) is not None
+        assert storage.get_state(URL).last_seen is not None
 
     def test_last_seen_loaded_from_storage(self):
         storage = MemoryStorage()
-        storage.set_last_seen(URL, OLD)
+        storage.set_state(URL, last_seen=OLD)
         scout = ScoutRSS(URL, lambda e: None, storage=storage)
         assert scout.last_seen == OLD
 
     def test_last_seen_override(self):
         storage = MemoryStorage()
-        storage.set_last_seen(URL, OLD)
+        storage.set_state(URL, last_seen=OLD)
         scout = ScoutRSS(URL, lambda e: None, storage=storage, last_seen=NEW1)
         assert scout.last_seen == NEW1
-        assert storage.get_last_seen(URL) == NEW1
+        assert storage.get_state(URL).last_seen == NEW1
 
 
 class TestStructToDatetime:
@@ -75,7 +90,7 @@ class TestStructToDatetime:
 class TestCheck:
     def _make_scout(self, callback=None, require_confirmation=False):
         storage = MemoryStorage()
-        storage.set_last_seen(URL, OLD)
+        storage.set_state(URL, last_seen=OLD)
         return ScoutRSS(
             URL,
             callback or MagicMock(return_value=True),
@@ -116,7 +131,6 @@ class TestCheck:
         e1 = make_entry(NEW1)
         e2 = make_entry(NEW2)
         e3 = make_entry(NEW3)
-        # feed returns newest-first (e3, e2, e1)
         with patch("scoutrss.socutrss.parse", return_value=make_parsed(e3, e2, e1)):
             scout.check()
         assert scout.callback.call_args_list == [call(e1), call(e2), call(e3)]
@@ -157,7 +171,6 @@ class TestCheck:
         e2 = make_entry(NEW2)
         with patch("scoutrss.socutrss.parse", return_value=make_parsed(e2, e1)):
             scout.check()
-        # e1 confirmed, e2 rejected — last_seen should be e1's time
         assert scout.last_seen == ScoutRSS._struct_to_datetime(e1.published_parsed)
 
     def test_callback_exception_stops_processing(self):
@@ -180,18 +193,163 @@ class TestCheck:
 
     def test_reloads_last_seen_from_storage(self):
         storage = MemoryStorage()
-        storage.set_last_seen(URL, OLD)
+        storage.set_state(URL, last_seen=OLD)
         scout = ScoutRSS(URL, MagicMock(return_value=True), storage=storage)
-        storage.set_last_seen(URL, NEW1)
+        storage.set_state(URL, last_seen=NEW1)
         with patch("scoutrss.socutrss.parse", return_value=make_parsed()):
             scout.check()
         assert scout.last_seen == NEW1
 
 
+class TestConditionalRequests:
+    def _make_scout(self):
+        storage = MemoryStorage()
+        storage.set_state(URL, last_seen=OLD)
+        return ScoutRSS(URL, MagicMock(return_value=True), storage=storage)
+
+    def test_304_skips_processing(self):
+        scout = self._make_scout()
+        with patch("scoutrss.socutrss.parse", return_value=make_parsed(status=304)):
+            scout.check()
+        scout.callback.assert_not_called()
+
+    def test_etag_passed_to_parse(self):
+        scout = self._make_scout()
+        scout.storage.set_state(URL, etag='"abc123"')
+        with patch("scoutrss.socutrss.parse", return_value=make_parsed()) as mock_parse:
+            scout.check()
+        _, kwargs = mock_parse.call_args
+        assert kwargs["etag"] == '"abc123"'
+        assert kwargs["modified"] is None
+
+    def test_modified_passed_to_parse(self):
+        scout = self._make_scout()
+        scout.storage.set_state(URL, modified="Mon, 01 Jan 2024 00:00:00 GMT")
+        with patch("scoutrss.socutrss.parse", return_value=make_parsed()) as mock_parse:
+            scout.check()
+        _, kwargs = mock_parse.call_args
+        assert kwargs["etag"] is None
+        assert kwargs["modified"] == "Mon, 01 Jan 2024 00:00:00 GMT"
+
+    def test_etag_persisted_after_check(self):
+        scout = self._make_scout()
+        entry = make_entry(NEW1)
+        with patch(
+            "scoutrss.socutrss.parse",
+            return_value=make_parsed(entry, etag='"new-etag"'),
+        ):
+            scout.check()
+        assert scout.storage.get_state(URL).etag == '"new-etag"'
+
+    def test_modified_persisted_after_check(self):
+        scout = self._make_scout()
+        entry = make_entry(NEW1)
+        with patch(
+            "scoutrss.socutrss.parse",
+            return_value=make_parsed(entry, modified="Tue, 02 Jan 2024"),
+        ):
+            scout.check()
+        assert scout.storage.get_state(URL).modified == "Tue, 02 Jan 2024"
+
+    def test_etag_and_modified_both_passed(self):
+        scout = self._make_scout()
+        scout.storage.set_state(URL, etag='"abc"', modified="Mon, 01 Jan 2024")
+        with patch("scoutrss.socutrss.parse", return_value=make_parsed()) as mock_parse:
+            scout.check()
+        _, kwargs = mock_parse.call_args
+        assert kwargs["etag"] == '"abc"'
+        assert kwargs["modified"] == "Mon, 01 Jan 2024"
+
+    def test_user_agent_passed_to_parse(self):
+        scout = self._make_scout()
+        with patch("scoutrss.socutrss.parse", return_value=make_parsed()) as mock_parse:
+            scout.check()
+        _, kwargs = mock_parse.call_args
+        assert kwargs["agent"] == scout.user_agent
+
+    def test_custom_user_agent(self):
+        storage = MemoryStorage()
+        storage.set_state(URL, last_seen=OLD)
+        scout = ScoutRSS(URL, MagicMock(), storage=storage, user_agent="MyBot/1.0")
+        assert scout.user_agent == "MyBot/1.0"
+        with patch("scoutrss.socutrss.parse", return_value=make_parsed()) as mock_parse:
+            scout.check()
+        _, kwargs = mock_parse.call_args
+        assert kwargs["agent"] == "MyBot/1.0"
+
+
+class TestEntryId:
+    def test_uses_guid(self):
+        entry = make_entry(NEW1, id="guid-123")
+        assert ScoutRSS._entry_id(entry) == "guid-123"
+
+    def test_falls_back_to_link_hash(self):
+        entry = make_entry(NEW1, link="https://example.com/post")
+        eid = ScoutRSS._entry_id(entry)
+        assert eid != "https://example.com/post"
+        assert len(eid) == 32  # blake2b hex
+
+    def test_falls_back_to_title_hash(self):
+        entry = make_entry(NEW1, title="My Post")
+        eid = ScoutRSS._entry_id(entry)
+        assert len(eid) == 32
+
+    def test_deterministic(self):
+        e1 = make_entry(NEW1, link="https://example.com/post")
+        e2 = make_entry(NEW2, link="https://example.com/post")
+        assert ScoutRSS._entry_id(e1) == ScoutRSS._entry_id(e2)
+
+
+class TestDedup:
+    def _make_scout(self, callback=None):
+        storage = MemoryStorage()
+        storage.set_state(URL, last_seen=OLD)
+        return ScoutRSS(
+            URL,
+            callback or MagicMock(return_value=True),
+            storage=storage,
+        )
+
+    def test_already_seen_entry_skipped(self):
+        scout = self._make_scout()
+        entry = make_entry(NEW1, id="guid-1")
+        scout.storage.set_state(URL, seen_ids={"guid-1"})
+        with patch("scoutrss.socutrss.parse", return_value=make_parsed(entry)):
+            scout.check()
+        scout.callback.assert_not_called()
+
+    def test_seen_ids_persisted_after_check(self):
+        scout = self._make_scout()
+        entry = make_entry(NEW1, id="guid-1")
+        with patch("scoutrss.socutrss.parse", return_value=make_parsed(entry)):
+            scout.check()
+        assert "guid-1" in scout.storage.get_state(URL).seen_ids
+
+    def test_duplicate_entry_with_drifted_timestamp(self):
+        """Same guid, different timestamp — should be deduped."""
+        scout = self._make_scout()
+        entry1 = make_entry(NEW1, id="guid-1")
+        entry2 = make_entry(NEW2, id="guid-1")
+        with patch("scoutrss.socutrss.parse", return_value=make_parsed(entry1)):
+            scout.check()
+        with patch("scoutrss.socutrss.parse", return_value=make_parsed(entry2)):
+            scout.check()
+        assert scout.callback.call_count == 1
+
+    def test_mixed_seen_and_unseen(self):
+        scout = self._make_scout()
+        scout.storage.set_state(URL, seen_ids={"guid-1"})
+        e1 = make_entry(NEW1, id="guid-1")
+        e2 = make_entry(NEW2, id="guid-2")
+        with patch("scoutrss.socutrss.parse", return_value=make_parsed(e2, e1)):
+            scout.check()
+        scout.callback.assert_called_once_with(e2)
+
+
 class TestListen:
     def _make_scout(self):
         storage = MemoryStorage()
-        storage.set_last_seen(URL, OLD)
+        storage.set_state(URL, last_seen=OLD)
         return ScoutRSS(URL, MagicMock(), storage=storage)
 
     def test_raises_without_apscheduler(self):
@@ -247,7 +405,7 @@ class TestListen:
 class TestStop:
     def test_removes_job_and_shuts_down(self):
         storage = MemoryStorage()
-        storage.set_last_seen(URL, OLD)
+        storage.set_state(URL, last_seen=OLD)
         scout = ScoutRSS(URL, MagicMock(), storage=storage)
         mock_scheduler = MagicMock()
         scout._scheduler = mock_scheduler
@@ -258,7 +416,7 @@ class TestStop:
 
     def test_does_not_shutdown_external_scheduler(self):
         storage = MemoryStorage()
-        storage.set_last_seen(URL, OLD)
+        storage.set_state(URL, last_seen=OLD)
         scout = ScoutRSS(URL, MagicMock(), storage=storage)
         mock_scheduler = MagicMock()
         scout._scheduler = mock_scheduler

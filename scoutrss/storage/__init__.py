@@ -1,6 +1,12 @@
-from .adapter import StorageAdapter
+from .adapter import FeedState, StorageAdapter
 from .file import FileStorage
 from .memory import MemoryStorage
 from .mongo import MongoStorage
 
-__all__ = ["StorageAdapter", "FileStorage", "MemoryStorage", "MongoStorage"]
+__all__ = [
+    "FeedState",
+    "StorageAdapter",
+    "FileStorage",
+    "MemoryStorage",
+    "MongoStorage",
+]
