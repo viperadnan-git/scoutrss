@@ -27,28 +27,20 @@ class FileStorage(StorageAdapter):
             val = entry.get("last_seen_at")
             return FeedState(
                 last_seen=datetime.fromisoformat(val) if val else None,
-                seen_ids=set(entry.get("seen_ids", [])),
+                seen_ids=list(entry.get("seen_ids", [])),
                 etag=entry.get("etag"),
                 modified=entry.get("modified"),
             )
 
-    def set_state(
-        self,
-        id: str,
-        last_seen: datetime | None = None,
-        seen_ids: set[str] | None = None,
-        etag: str | None = None,
-        modified: str | None = None,
-    ) -> None:
+    def set_state(self, id: str, state: FeedState) -> None:
         with self._lock:
             data = self._read()
-            entry = data.setdefault(id, {})
-            if last_seen is not None:
-                entry["last_seen_at"] = last_seen.isoformat()
-            if seen_ids is not None:
-                entry["seen_ids"] = list(seen_ids)
-            if etag is not None:
-                entry["etag"] = etag
-            if modified is not None:
-                entry["modified"] = modified
+            data[id] = {
+                "last_seen_at": state.last_seen.isoformat()
+                if state.last_seen
+                else None,
+                "seen_ids": list(state.seen_ids),
+                "etag": state.etag,
+                "modified": state.modified,
+            }
             self._write(data)

@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime, timezone
 from hashlib import blake2b
@@ -6,7 +7,7 @@ from typing import Any, Callable, Optional, cast
 
 from feedparser import FeedParserDict, parse
 
-from .storage.adapter import StorageAdapter
+from .storage.adapter import FeedState, StorageAdapter
 from .storage.file import FileStorage
 
 logger = logging.getLogger(__name__)
@@ -46,12 +47,14 @@ class ScoutRSS:
         state = self.storage.get_state(self.id)
         if last_seen:
             self.last_seen = last_seen
-            self.storage.set_state(self.id, last_seen=last_seen)
+            state.last_seen = last_seen
+            self.storage.set_state(self.id, state)
         elif state.last_seen is not None:
             self.last_seen = state.last_seen
         else:
             self.last_seen = datetime.now(tz=timezone.utc)
-            self.storage.set_state(self.id, last_seen=self.last_seen)
+            state.last_seen = self.last_seen
+            self.storage.set_state(self.id, state)
 
     @staticmethod
     def _struct_to_datetime(struct: struct_time) -> datetime:
@@ -59,10 +62,12 @@ class ScoutRSS:
 
     @staticmethod
     def _entry_id(entry: FeedParserDict) -> str:
-        """Resolve a unique ID for an entry: guid > hash(link) > hash(title)."""
+        """Resolve a unique ID for an entry: guid > hash(link) > hash(title) > hash(dict)."""
         if entry.get("id"):
             return entry.id
-        value = entry.get("link") or entry.get("title") or ""
+        value = entry.get("link") or entry.get("title")
+        if not value:
+            value = json.dumps(dict(entry), sort_keys=True, default=str)
         return blake2b(value.encode(), digest_size=16).hexdigest()
 
     def check(self) -> None:
@@ -75,7 +80,7 @@ class ScoutRSS:
         """
         state = self.storage.get_state(self.id)
         self.last_seen = state.last_seen or self.last_seen
-        seen_ids = state.seen_ids
+        seen_ids = dict.fromkeys(state.seen_ids)
 
         parsed = parse(
             self.url,
@@ -89,6 +94,12 @@ class ScoutRSS:
             return
 
         if not parsed.entries:
+            # feed returned content but no entries — clear cached etag/modified
+            # so next check does a full fetch instead of potentially getting 304 forever
+            if state.etag or state.modified:
+                state.etag = None
+                state.modified = None
+                self.storage.set_state(self.id, state)
             return
 
         new_entries = (
@@ -97,7 +108,7 @@ class ScoutRSS:
             if entry.get("published_parsed")
             and self._struct_to_datetime(cast(struct_time, entry.published_parsed))
             > self.last_seen
-            and self._entry_id(entry) not in seen_ids
+            and self._entry_id(entry) not in seen_ids  # O(1) dict lookup
         )
 
         # sort oldest-first so last_seen advances entry by entry
@@ -108,15 +119,17 @@ class ScoutRSS:
 
         logger.debug(f"Found {len(new_entries)} new entries for {self.url}")
 
+        etag = None
+        modified = None
         for entry in new_entries:
             entry_time = self._struct_to_datetime(
                 cast(struct_time, entry.published_parsed)
             )
             try:
                 confirm = self.callback(entry)
-                seen_ids.add(self._entry_id(entry))
                 if self.require_confirmation:
                     if confirm:
+                        seen_ids[self._entry_id(entry)] = None
                         self.last_seen = entry_time
                     else:
                         logger.warning(
@@ -124,21 +137,30 @@ class ScoutRSS:
                         )
                         break
                 else:
+                    seen_ids[self._entry_id(entry)] = None
                     self.last_seen = entry_time
             except Exception:
                 logger.exception("Error in callback, stopping at current entry")
                 break
+        else:
+            # all entries processed — safe to cache etag/modified
+            etag = parsed.get("etag")
+            modified = parsed.get("modified")
 
-        # prune to a cap based on feed size (minimum MIN_SEEN_IDS)
-        max_ids = max(MIN_SEEN_IDS, len(new_entries) * SEEN_IDS_MULTIPLIER)
+        # prune oldest IDs, keeping the most recent entries
+        max_ids = max(MIN_SEEN_IDS, len(parsed.entries) * SEEN_IDS_MULTIPLIER)
         if len(seen_ids) > max_ids:
-            seen_ids = set(list(seen_ids)[-max_ids:])
+            # dict is insertion-ordered; drop from front (oldest)
+            seen_ids = dict(list(seen_ids.items())[-max_ids:])
+
         self.storage.set_state(
             self.id,
-            last_seen=self.last_seen,
-            seen_ids=seen_ids,
-            etag=parsed.get("etag"),
-            modified=parsed.get("modified"),
+            FeedState(
+                last_seen=self.last_seen,
+                seen_ids=list(seen_ids),
+                etag=etag,
+                modified=modified,
+            ),
         )
 
     def listen(
