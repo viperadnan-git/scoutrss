@@ -61,6 +61,11 @@ class ScoutRSS:
         return datetime.fromtimestamp(mktime(struct), tz=timezone.utc)
 
     @staticmethod
+    def _entry_time(entry: FeedParserDict) -> struct_time | None:
+        """Resolve entry timestamp: published_parsed > updated_parsed."""
+        return entry.get("published_parsed") or entry.get("updated_parsed")
+
+    @staticmethod
     def _entry_id(entry: FeedParserDict) -> str:
         """Resolve a unique ID for an entry: guid > hash(link) > hash(title) > hash(dict)."""
         if entry.get("id"):
@@ -105,8 +110,8 @@ class ScoutRSS:
         new_entries = (
             entry
             for entry in parsed.entries
-            if entry.get("published_parsed")
-            and self._struct_to_datetime(cast(struct_time, entry.published_parsed))
+            if self._entry_time(entry)
+            and self._struct_to_datetime(cast(struct_time, self._entry_time(entry)))
             > self.last_seen
             and self._entry_id(entry) not in seen_ids  # O(1) dict lookup
         )
@@ -114,7 +119,7 @@ class ScoutRSS:
         # sort oldest-first so last_seen advances entry by entry
         new_entries = sorted(
             new_entries,
-            key=lambda e: e.published_parsed,
+            key=lambda e: self._entry_time(e),
         )
 
         logger.debug(f"Found {len(new_entries)} new entries for {self.url}")
@@ -123,7 +128,7 @@ class ScoutRSS:
         modified = None
         for entry in new_entries:
             entry_time = self._struct_to_datetime(
-                cast(struct_time, entry.published_parsed)
+                cast(struct_time, self._entry_time(entry))
             )
             try:
                 confirm = self.callback(entry)

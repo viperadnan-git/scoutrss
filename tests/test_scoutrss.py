@@ -15,13 +15,20 @@ NEW2 = datetime(2024, 1, 21, 0, 0, 0, tzinfo=timezone.utc)
 NEW3 = datetime(2024, 1, 22, 0, 0, 0, tzinfo=timezone.utc)
 
 
+def _to_struct(dt: datetime):
+    return strptime(dt.strftime("%Y-%m-%d %H:%M:%S"), "%Y-%m-%d %H:%M:%S")
+
+
 def make_entry(
-    published: datetime, id: str = None, link: str = None, title: str = None
+    published: datetime = None,
+    id: str = None,
+    link: str = None,
+    title: str = None,
+    updated: datetime = None,
 ) -> MagicMock:
     entry = MagicMock()
-    entry.published_parsed = strptime(
-        published.strftime("%Y-%m-%d %H:%M:%S"), "%Y-%m-%d %H:%M:%S"
-    )
+    entry.published_parsed = _to_struct(published) if published else None
+    entry.updated_parsed = _to_struct(updated) if updated else None
     entry.id = id
     entry.link = link
     entry.title = title
@@ -140,6 +147,23 @@ class TestCheck:
         with patch("scoutrss.socutrss.parse", return_value=make_parsed(entry)):
             scout.check()
         scout.callback.assert_not_called()
+
+    def test_updated_parsed_fallback(self):
+        """Entries with only updated_parsed (no published_parsed) are still processed."""
+        scout = self._make_scout()
+        entry = make_entry(updated=NEW1)
+        with patch("scoutrss.socutrss.parse", return_value=make_parsed(entry)):
+            scout.check()
+        scout.callback.assert_called_once_with(entry)
+
+    def test_published_preferred_over_updated(self):
+        """When both timestamps exist, published_parsed is used."""
+        scout = self._make_scout()
+        entry = make_entry(published=NEW1, updated=NEW2)
+        with patch("scoutrss.socutrss.parse", return_value=make_parsed(entry)):
+            scout.check()
+        state = scout.storage.get_state(URL)
+        assert state.last_seen == ScoutRSS._struct_to_datetime(_to_struct(NEW1))
 
     def test_entries_processed_oldest_first(self):
         scout = self._make_scout()
